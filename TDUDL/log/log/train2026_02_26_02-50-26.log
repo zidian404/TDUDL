@@ -1,0 +1,42 @@
+26-02-26 02:50:26.078 :   task: train
+  gpu_ids: [0, 1, 2, 3]
+  log_path: ./log
+  model_save: ./model_save
+  pretained_path:[
+    index: False
+    path: ./model_save/model_best.pth
+  ]
+  batch_size: 1
+  nc: [1, 16]
+  patch_size: [128, 128]
+  stride_size: [16, 16]
+  atoms: 50
+  d_size: 3
+  max_epoch: 1000
+  stage: 3
+  lr: 0.0001
+  loss_function_index: 1
+  n_channels: 1
+  train:[
+    sigma: [15, 50]
+    dataroot_H: ./dataset/gray_train
+    H_size: 128
+    n_channels: 1
+  ]
+  valid:[
+    sigma: [15, 25, 50]
+    dataroot_H: ./dataset/gray_valid
+    n_channels: 1
+  ]
+  opt_path: ./options/train_options.json
+  is_train: True
+  scale: 1
+
+26-02-26 02:50:27.128 : Number of parameter: 3.41M
+26-02-26 02:50:27.128 : start training...
+26-02-26 02:52:32.885 : epoch:[1/1000], 平均loss: 0.0586
+26-02-26 02:54:37.772 : epoch:[2/1000], 平均loss: 0.0362
+26-02-26 02:56:42.493 : epoch:[3/1000], 平均loss: 0.0334
+26-02-26 02:58:47.951 : epoch:[4/1000], 平均loss: 0.0317
+26-02-26 03:00:52.651 : epoch:[5/1000], 平均loss: 0.0303
+26-02-26 03:02:58.357 : epoch:[6/1000], 平均loss: 0.0300

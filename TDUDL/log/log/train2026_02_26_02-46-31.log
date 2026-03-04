@@ -1,0 +1,37 @@
+26-02-26 02:46:31.189 :   task: train
+  gpu_ids: [0, 1, 2, 3]
+  log_path: ./log
+  model_save: ./model_save
+  pretained_path:[
+    index: False
+    path: ./model_save/model_best.pth
+  ]
+  batch_size: 1
+  nc: [1, 16]
+  patch_size: [128, 128]
+  stride_size: [16, 16]
+  atoms: 50
+  d_size: 3
+  max_epoch: 1000
+  stage: 3
+  lr: 0.0001
+  loss_function_index: 1
+  n_channels: 1
+  train:[
+    sigma: [15, 50]
+    dataroot_H: ./dataset/gray_train
+    H_size: 128
+    n_channels: 1
+  ]
+  valid:[
+    sigma: [15, 25, 50]
+    dataroot_H: ./dataset/gray_valid
+    n_channels: 1
+  ]
+  opt_path: ./options/train_options.json
+  is_train: True
+  scale: 1
+
+26-02-26 02:46:32.153 : Number of parameter: 3.41M
+26-02-26 02:46:32.154 : start training...
+26-02-26 02:46:32.973 : 训练出错: CUDA out of memory. Tried to allocate 20.00 MiB. GPU 0 has a total capacity of 23.52 GiB of which 17.38 MiB is free. Process 4052 has 13.43 GiB memory in use. Including non-PyTorch memory, this process has 10.06 GiB memory in use. Of the allocated memory 9.48 GiB is allocated by PyTorch, and 128.08 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
