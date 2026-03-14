@@ -80,18 +80,25 @@ class HeadNet(nn.Module):
         return x
 
 ##########################################################################
-# Di 卷积及其“转置”卷积（按 batch）
+# Di 卷积及其"转置"卷积（按 batch） - 修改版，支持维度自动处理
 
 def apply_Di(X: torch.Tensor, D_i: torch.Tensor) -> torch.Tensor:
     """
     X:   [B, Cx, H, W]
-    D_i: [B, Cy, Cx, k, k]
+    D_i: [B, Cy, Cx, k, k] 或自动处理额外维度
     返回 Y: [B, Cy, H, W]
     """
     B, Cx, H, W = X.shape
-    assert D_i.dim() == 5, f"Di dim must be 5, got {D_i.dim()}"
+    
+    # 自动处理维度：squeeze掉末尾多余维度
+    while D_i.dim() > 5:
+        D_i = D_i.squeeze(-1)
+    if D_i.dim() != 5:
+        raise ValueError(f"Di dim must be 5 after squeezing, got {D_i.dim()}")
+    
     _, Cy, Cx_d, k, _ = D_i.shape
     assert Cx_d == Cx, f"Di Cx={Cx_d} must match X Cx={Cx}"
+    assert D_i.size(0) == B, f"Di batch size {D_i.size(0)} must match X batch size {B}"
 
     # unfold X -> [B, Cx*k*k, N]
     patches = F.unfold(X, kernel_size=k, padding=k // 2)   # [B, Cx*k*k, N]
@@ -113,13 +120,20 @@ def apply_Di(X: torch.Tensor, D_i: torch.Tensor) -> torch.Tensor:
 def apply_Di_T(Y: torch.Tensor, D_i: torch.Tensor) -> torch.Tensor:
     """
     Y:   [B, Cy, H, W]
-    D_i: [B, Cy, Cx, k, k]
+    D_i: [B, Cy, Cx, k, k] 或自动处理额外维度
     返回 X_grad: [B, Cx, H, W]
     """
     B, Cy, H, W = Y.shape
-    assert D_i.dim() == 5
+    
+    # 自动处理维度：squeeze掉末尾多余维度
+    while D_i.dim() > 5:
+        D_i = D_i.squeeze(-1)
+    if D_i.dim() != 5:
+        raise ValueError(f"Di dim must be 5 after squeezing, got {D_i.dim()}")
+    
     _, Cy_d, Cx, k, _ = D_i.shape
     assert Cy_d == Cy, f"Di Cy={Cy_d} must match Y Cy={Cy}"
+    assert D_i.size(0) == B, f"Di batch size {D_i.size(0)} must match Y batch size {B}"
 
     # unfold Y -> [B, Cy*k*k, N]
     patches = F.unfold(Y, kernel_size=k, padding=k // 2)   # [B, Cy*k*k, N]
@@ -129,8 +143,8 @@ def apply_Di_T(Y: torch.Tensor, D_i: torch.Tensor) -> torch.Tensor:
     patches = patches.transpose(1, 2)                      # [B, N, Cy*k*k]
 
     # D_i^T: [B, Cx, Cy, k, k]
-    K_T = D_i.permute(0, 2, 1, 3, 4).contiguous()          # [B, Cx, Cy, k, k]
-    K_T_flat = K_T.view(B, Cx, Cy * k * k)                 # [B, Cx, Cy*k*k]
+    K_T = D_i.permute(0, 2, 1, 3, 4).contiguous()         # [B, Cx, Cy, k, k]
+    K_T_flat = K_T.view(B, Cx, Cy * k * k)                # [B, Cx, Cy*k*k]
 
     # [B, Cx, N] = [B, Cx, Cy*k*k] @ [B, Cy*k*k, N]
     X_flat = torch.bmm(K_T_flat, patches.transpose(1, 2))  # [B, Cx, N]
@@ -156,7 +170,7 @@ class BodyNet(nn.Module):
         X = X_in
         ids = ids.to(torch.long).to(device)
 
-        # 取本 batch 对应的 Di: [B,Cy,Cx,k,k]
+        # 取本 batch 对应的 Di: [B,Cy,Cx,k,k] - 自动维度处理
         Di_batch = self.Di_param[ids]
 
         # ---- X-step: 用 S + Di ----
@@ -189,7 +203,7 @@ class BodyNet(nn.Module):
 # 主网络：共享 S + 每样本 Di
 
 class denoise_Net_admm_restormer(nn.Module):
-    def __init__(self, opt, n_samples: int = 1120):
+    def __init__(self, opt, n_samples: int = 1600):
         super(denoise_Net_admm_restormer, self).__init__()
 
         self.n_channels = opt["n_channels"]   # 图像域通道 Cy
@@ -245,8 +259,8 @@ class denoise_Net_admm_restormer(nn.Module):
         sigma = sigma.view(sigma.size(0), 1, 1, 1)
 
         # 初始化 X^0：图像域 -> 系数域
-        X_img0 = self.headnet(input, sigma)       # [B,Cy,H,W]
-        X = self.S_T(X_img0)                      # [B,Cx,H,W]
+        X_img0 = self.headnet(input, sigma)        # [B,Cy,H,W]
+        X = self.S_T(X_img0)                       # [B,Cx,H,W]
 
         preds = []
         Z = torch.zeros_like(X)
@@ -264,14 +278,15 @@ class denoise_Net_admm_restormer(nn.Module):
             gamma3 = hypas[:, 4:5, :, :]
             gamma  = [gamma1, gamma2, gamma3]
 
+            # 取本 batch 对应的 Di: 自动维度处理
+            Di_batch = self.Di_param[ids]
+
             if k == 0:
                 # -------- k==0：按 ADMM 初始化逻辑 + 用 S+Di --------
-                Di_batch = self.Di_param[ids]          # [B,Cy,Cx,k,k]
-
                 # X1 = (S+Di)(X)
-                Y_S = self.S(X)                        # [B,Cy,H,W]
-                Y_D = apply_Di(X, Di_batch)           # [B,Cy,H,W]
-                X1  = Y_S + Y_D                        # 图像域
+                Y_S = self.S(X)                     # [B,Cy,H,W]
+                Y_D = apply_Di(X, Di_batch)         # [B,Cy,H,W]
+                X1  = Y_S + Y_D                     # 图像域
 
                 # temp_back = S_T(X1) + Di^T(input)
                 temp_back = self.S_T(X1) + apply_Di_T(input, Di_batch)  # [B,Cx,H,W]
@@ -280,10 +295,10 @@ class denoise_Net_admm_restormer(nn.Module):
                 # X2 = (S+Di)(temp)
                 Y_S_temp = self.S(temp)
                 Y_D_temp = apply_Di(temp, Di_batch)
-                X2 = Y_S_temp + Y_D_temp               # 图像域
+                X2 = Y_S_temp + Y_D_temp            # 图像域
 
                 # 转回系数域
-                X1_coef = self.S_T(X1)                 # [B,Cx,H,W]
+                X1_coef = self.S_T(X1)              # [B,Cx,H,W]
                 X2_coef = self.S_T(X2)
 
                 X_ = X2_coef + rho * X1_coef
@@ -310,7 +325,6 @@ class denoise_Net_admm_restormer(nn.Module):
                     ids, X, input, Z, beta, alpha, rho,
                     gamma, samfeats, enc, dec
                 )
-                Di_batch = self.Di_param[ids]
                 Y_S_out = self.S(X)
                 Y_D_out = apply_Di(X, Di_batch)
                 output = Y_S_out + Y_D_out

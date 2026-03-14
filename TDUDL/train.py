@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Dict
 import torch.utils.data as data
 import torch
 import time
@@ -11,14 +11,16 @@ from math import log
 import signal
 import sys
 import numpy as np
+from glob import glob
 
+# 🔥 所有导入
 import Net.denoise_net as net
 from utils.dataset_admm import get_data
 from utils.loss_function import loss_function
 import utils.utils_option as option
 import utils.utils_image as image
 from utils import utils_logger
-
+from utils.global_id_map import load_global_id_map, generate_global_id_map  # 🔥 全局id映射
 
 def adjust_learning_rate(opt, epo, lr_ini, max_epoch):
     P1 = 50
@@ -27,29 +29,41 @@ def adjust_learning_rate(opt, epo, lr_ini, max_epoch):
         lr = lr_ini * (0.65 ** (epo // (P1 // log(0.1, 0.65))))
     else:
         lr = lr_ini * 0.1 * (0.85 ** ((epo - P1) // (P2 // log(0.1, 0.85))))
-
     for param_group in opt.param_groups:
         param_group['lr'] = lr
-
 
 if __name__ == '__main__':
     # 基本设置
     os.environ["CUDA_VISIBLE_DEVICES"] = '0'
     device = torch.device('cuda')
     print(f"Using GPU for training!\n")
-        
-    # 配置
+    
+    # 🔥 修复1：先解析opt
     json_path = "./options/train_options.json"
     opt = option.parse(json_path, is_train=True)
+    
+    # 🔥 修复2：安全生成全局id映射
+    try:
+        path2id, total_n_samples = load_global_id_map()
+        print(f"✅ 加载全局id映射: {total_n_samples} 张图")
+    except FileNotFoundError:
+        print("⚠️  id_map.json 不存在，正在生成...")
+        path2id, total_n_samples = generate_global_id_map(json_path)
+        print(f"📊 Di_param 大小设为: {total_n_samples}")
+    
+    # 日志
     logger_name = 'train' + time.strftime('%Y_%m_%d_%H-%M-%S', time.localtime())
     utils_logger.logger_info(logger_name, os.path.join(opt['log_path'], logger_name + '.log'))
     logger = logging.getLogger(logger_name)
     logger.info(option.dict2str(opt))
 
-    # 数据集
+    # 数据集 - 使用全局唯一id
     print("加载数据集...")
-    train_set = get_data(opt, 'train')
-    valid_set = get_data(opt, 'valid')
+    train_set = get_data(opt, 'train', path2id=path2id)
+    valid_set = get_data(opt, 'valid', path2id=path2id)
+    
+    logger.info(f"训练集大小: {len(train_set)}")
+    logger.info(f"验证集数量: {len(valid_set)} (每个 sigma 一个 Dataset)")
     
     # 数据加载配置
     train_loader = data.DataLoader(
@@ -72,9 +86,9 @@ if __name__ == '__main__':
             pin_memory=True
         ))
 
-    # 模型初始化
+    # 模型初始化 - 使用全局图数
     print("初始化模型...")
-    model = net.denoise_Net_admm_restormer(opt)
+    model = net.denoise_Net_admm_restormer(opt, n_samples=total_n_samples)
     model.to(device)
     
     optimizer = torch.optim.Adam(model.parameters(), lr=opt['lr'])
@@ -94,10 +108,10 @@ if __name__ == '__main__':
     best_epoch = 0
     batch_accumulation = 1
     max_accumulation = 0
-    psnr_val_rgb = 0  # 预先初始化避免报错
+    psnr_val_rgb = 0
 
     if opt["pretained_path"]["index"]:
-        state = torch.load(opt['pretained_path']["path"])
+        state = torch.load(opt['pretained_path']["path"], weights_only=False)
         model.load_state_dict(state['state_dict'], strict=False)
 
     reduce_schedule = optim.lr_scheduler.ReduceLROnPlateau(
@@ -105,7 +119,7 @@ if __name__ == '__main__':
         threshold=1e-3, threshold_mode='abs', min_lr=0, eps=1e-8
     )
 
-    eval_num = 10
+    eval_num = 5
 
     # 中断处理
     def signal_handler(sig, frame):
@@ -134,12 +148,8 @@ if __name__ == '__main__':
             pbar = tqdm(train_loader, desc=f'Epoch {epoch+1} [Train]')
             
             for batch_idx, batch_data in enumerate(pbar):
-                if len(batch_data) == 4:
-                    img_H, img_L, noise_level, ids = batch_data
-                else:
-                    img_H, img_L, noise_level = batch_data
-                    ids = torch.zeros(img_L.shape[0]).long()
-
+                img_H, img_L, noise_level, ids = batch_data
+                
                 img_H = img_H.to(device, non_blocking=True)
                 img_L = img_L.to(device, non_blocking=True)
                 noise_level = noise_level.to(device, non_blocking=True)
@@ -177,25 +187,12 @@ if __name__ == '__main__':
                 model.eval()
                 test_loss, test_psnr, test_ssim, valid_batches = 0, 0, 0, 0
                 
-                # 为所有验证集创建一个总进度条
                 val_pbar = tqdm(total=sum(len(tl) for tl in test_loaders), desc=f'Epoch {epoch+1} [Val]')
                 
                 with torch.no_grad():
                     for test_loader in test_loaders:
                         for batch_idx, batch_data in enumerate(test_loader):
-                            if len(batch_data) == 4:
-                                v_img_H, v_img_L, v_noise, v_ids = batch_data
-                            else:
-                                v_img_H, v_img_L, v_noise = batch_data
-                                v_ids = torch.zeros(v_img_L.shape[0]).long()
-
-                            # 尺寸裁剪逻辑 (保持 256x256 避免 OOM)
-                            max_size = 256
-                            if v_img_L.shape[2] > max_size or v_img_L.shape[3] > max_size:
-                                H, W = v_img_L.shape[2], v_img_L.shape[3]
-                                start_h, start_w = (H - max_size) // 2, (W - max_size) // 2
-                                v_img_L = v_img_L[:, :, start_h:start_h+max_size, start_w:start_w+max_size]
-                                v_img_H = v_img_H[:, :, start_h:start_h+max_size, start_w:start_w+max_size]
+                            v_img_H, v_img_L, v_noise, v_ids = batch_data
 
                             v_img_H = v_img_H.to(device)
                             v_img_L = v_img_L.to(device)
@@ -203,10 +200,19 @@ if __name__ == '__main__':
                             v_ids = v_ids.to(device)
 
                             v_out, _ = model(v_img_L, v_noise, v_ids)
-                            if isinstance(v_out, (list, tuple)): v_out = v_out[0]
-                            if v_out.dim() == 3: v_out = v_out.unsqueeze(1)
-                            if v_img_H.dim() == 3: v_img_H = v_img_H.unsqueeze(1)
+                            if isinstance(v_out, (list, tuple)):
+                                v_out = v_out[0]
+                            if v_out.dim() == 3:
+                                v_out = v_out.unsqueeze(1)
+                            if v_img_H.dim() == 3:
+                                v_img_H = v_img_H.unsqueeze(1)
                             
+                            if v_out.shape[2:] != v_img_H.shape[2:]:
+                                v_out = torch.nn.functional.interpolate(
+                                    v_out, size=v_img_H.shape[2:], 
+                                    mode='bilinear', align_corners=False
+                                )
+
                             test_loss += criterion(v_out, v_img_H).item()
                             v_out_u = image.tensor2uint(v_out)
                             v_img_H_u = image.tensor2uint(v_img_H)
@@ -216,18 +222,16 @@ if __name__ == '__main__':
                             test_ssim += image.calculate_ssim(v_out_u, v_img_H_u)
                             valid_batches += 1
                             
-                            # 更新验证进度条后缀
                             val_pbar.set_postfix({'curr_PSNR': f'{current_psnr:.2f}'})
                             val_pbar.update(1)
                 
-                val_pbar.close() # 关闭验证进度条
+                val_pbar.close()
 
                 if valid_batches > 0:
                     psnr_val_rgb = test_psnr / valid_batches
                     ssim_val_rgb = test_ssim / valid_batches
                     avg_test_loss = test_loss / valid_batches
                     
-                    # 显式打印结果，方便观察
                     print(f"\n[Validation Result] PSNR: {psnr_val_rgb:.4f} | SSIM: {ssim_val_rgb:.4f} | Loss: {avg_test_loss:.4f}")
                     
                     if psnr_val_rgb > best_psnr:
