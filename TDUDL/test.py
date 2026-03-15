@@ -6,19 +6,17 @@ import os
 import logging
 from glob import glob
 from prettytable import PrettyTable
-from torch import cuda
 import numpy as np
-from collections import OrderedDict  # ← **新增这行！**
-import Net.denoise_net as net  # 与train.py保持一致
-from utils.dataset_admm import get_data  # 使用新的dataset_admm-3.py
+from collections import OrderedDict
+import Net.denoise_net as net  
+from utils.dataset_admm import get_data  
 import utils.utils_option as option
 import utils.utils_image as image
 from utils import utils_logger
-from utils.global_id_map import load_global_id_map, generate_global_id_map  # 🔥 全局id映射
+from utils.global_id_map import load_global_id_map, generate_global_id_map
 
-# 🔥 在主函数开头添加全局id映射（和train一致）
+# 构建全局id映射
 def build_global_id_mapping_test(opt: Dict) -> tuple[Dict[str, int], int]:
-    """测试时构建全局映射（包含test）"""
     all_paths = []
     for split_name in ['train', 'valid', 'test']:
         if split_name in opt:
@@ -30,219 +28,144 @@ def build_global_id_mapping_test(opt: Dict) -> tuple[Dict[str, int], int]:
     global_paths = sorted(list(set(all_paths)))
     path2id = {path: idx for idx, path in enumerate(global_paths)}
     total_n_samples = len(global_paths)
-    
-    print(f"🔍 测试全局图库: {total_n_samples} 张图")
     return path2id, total_n_samples
 
-try:
-    path2id, total_n_samples = load_global_id_map()
-except FileNotFoundError:
-    print("⚠️  id_map.json 不存在，请先运行 train.py 生成")
-    path2id, total_n_samples = build_global_id_mapping_test(opt)  # fallback到你原来的函数
-
-
-
 def safe_forward(model, img_L, noise_level, ids):
-    """安全的前向传播，处理NaN/Inf"""
     with torch.no_grad():
         if torch.isnan(img_L).any() or torch.isinf(img_L).any():
             img_L = torch.nan_to_num(img_L, nan=0.0, posinf=1.0, neginf=0.0)
-        if torch.isnan(noise_level).any() or torch.isinf(noise_level).any():
-            noise_level = torch.nan_to_num(noise_level, nan=0.0, posinf=1.0, neginf=0.0)
-        if torch.isnan(ids).any() or torch.isinf(ids).any():
-            ids = torch.nan_to_num(ids, nan=0.0, posinf=1.0, neginf=0.0)
         
         test_out, _ = model(img_L, noise_level, ids)
+        
         if torch.isnan(test_out).any() or torch.isinf(test_out).any():
             test_out = torch.nan_to_num(test_out, nan=0.0, posinf=1.0, neginf=0.0)
         return test_out
 
 if __name__ == '__main__':
-    # GPU设置
-    gpus = '0'  # 与train.py一致
+    gpus = '0'  
     os.environ["CUDA_VISIBLE_DEVICES"] = gpus
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
-    # 随机种子
     seed = 1234
     np.random.seed(seed)
     torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
 
-    print("======================= 测试开始 =======================")
-
-    # 配置加载
     json_path = "./options/test_options.json"
     opt = option.parse(json_path, is_train=False)
     
-    # 日志
     logger_name = 'test_' + time.strftime('%Y_%m_%d_%H-%M-%S', time.localtime())
     utils_logger.logger_info(logger_name, os.path.join(opt['log_path'], logger_name + '.log'))
     logger = logging.getLogger(logger_name)
-    logger.info(option.dict2str(opt))
 
-    # 测试图像名称（用于显示）
+    try:
+        path2id, total_n_samples = load_global_id_map()
+        print(f"📈 从id_map.json加载映射: 总样本数={total_n_samples}")
+    except:
+        path2id, total_n_samples = build_global_id_mapping_test(opt)
+
     test_data_path = opt['test']['dataroot_H']
-    names = sorted([os.path.basename(name) for name in glob(os.path.join(test_data_path, '*'))])
-    print(f"Found {len(names)} test images in path {test_data_path}")
+    img_names = sorted([os.path.basename(name) for name in glob(os.path.join(test_data_path, '*'))])
+    test_set_list = get_data(opt, 'test', path2id=path2id) 
+    
+    sigma_list = opt['test']['sigma']
+    sigma_size = len(sigma_list)
 
-    print("Loading test datasets...")
-    test_set = get_data(opt, 'test', path2id=path2id)  # 返回 List[Dataset]，每个sigma一个
-    print(f"Loaded {len(test_set)} test sets (one for each sigma)")
-
-    # 创建DataLoader
-    test_loaders: List[data.DataLoader] = []
-    for valid in test_set:
-        loader = data.DataLoader(
-            dataset=valid, 
-            batch_size=1, 
-            shuffle=False, 
-            num_workers=0,  # 大图建议用0，避免多进程问题
-            drop_last=False,
-            pin_memory=True
-        )
-        test_loaders.append(loader)
-    print(f"Total {len(test_loaders)} DataLoaders created.")
-
-    # 模型加载
-    print("Loading model...")
-    model = net.denoise_Net_admm_restormer(opt, n_samples=total_n_samples)  # 与train.py一致
+    model = net.denoise_Net_admm_restormer(opt, n_samples=total_n_samples)
     model.to(device)
     
     pretrained_path = opt['pretained_path']
-    if not os.path.exists(pretrained_path):
-        print(f"ERROR: Model file not found: {pretrained_path}")
-        exit(1)
+    print(f"Loading model from {pretrained_path}...")
+    state_dict = torch.load(pretrained_path, map_location=device, weights_only=False)
+    state_dict = state_dict['state_dict'] if 'state_dict' in state_dict else state_dict
     
-    print(f"Loading pretrained model from {pretrained_path}")
-    state = torch.load(pretrained_path, map_location='cpu', weights_only=False)
-    if 'state_dict' in state:
-        state_dict = state['state_dict']
-    else:
-        state_dict = state
-    
-    # 处理DataParallel权重（现在可以用 OrderedDict 了）
     new_state_dict = OrderedDict()
     for k, v in state_dict.items():
-        if k.startswith('module.'):
-            name = k[7:]
-            new_state_dict[name] = v
-        else:
-            new_state_dict[k] = v
-    
-    model.load_state_dict(new_state_dict, strict=False)
-    print("Model loaded successfully!")
+        name = k[7:] if k.startswith('module.') else k
+        new_state_dict[name] = v
+
+    model_dict = model.state_dict()
+    for k, v in new_state_dict.items():
+        if k in model_dict and v.shape == model_dict[k].shape:
+            model_dict[k].copy_(v)
+    model.load_state_dict(model_dict, strict=True)
     model.eval()
 
-    # 测试统计
-    avg_psnrs: Dict[str, List[float]] = {}
-    avg_ssims: Dict[str, List[float]] = {}
-    sigma_size = len(opt['test']['sigma'])
-    total_inference_time = 0
-    total_batches = 0
+    detailed_psnrs = OrderedDict()
+    detailed_ssims = OrderedDict()
 
-    print(f"Full testing with {len(test_loaders)} loaders...")
-    print("======================= 测试进行中 =======================")
-
-    for loader_idx, test_loader in enumerate(test_loaders):
-        avg_psnr = 0.0
-        avg_ssim = 0.0
-        
-        # 数据集名称和sigma
-        image_index = loader_idx // sigma_size
-        sigma_idx = loader_idx % sigma_size
-        sigma_level = opt['test']['sigma'][sigma_idx]
-        dataset_name = names[image_index] if image_index < len(names) else f"UnknownDataset_{image_index}"
-        
-        print(f"\n- Processing {dataset_name}, sigma={sigma_level}")
-        loader_inference_time = 0
-        batch_count = 0
-        
-        with torch.no_grad():
-            for batch_idx, batch_data in enumerate(test_loader):
-                batch_count += 1
-                
-                # 统一解包4元组，与dataset_admm.py一致
-                img_H, img_L, noise_level, ids = batch_data  # ids现在来自dataset
-                
-                # 移动到设备（大图优化）
-                img_H = img_H.to(device, non_blocking=True)
-                img_L = img_L.to(device, non_blocking=True)
-                noise_level = noise_level.to(device, non_blocking=True)
-                ids = ids.to(device, non_blocking=True)
-                
-                # 前向传播
-                start_time = time.time()
-                test_out = safe_forward(model, img_L, noise_level, ids)
-                batch_time = time.time() - start_time
-                
-                total_inference_time += batch_time
-                loader_inference_time += batch_time
-                total_batches += 1
-                
-                # 处理维度（与train.py验证部分一致）
-                if isinstance(test_out, (list, tuple)):
-                    test_out = test_out[0]
-                if test_out.dim() == 3:
-                    test_out = test_out.unsqueeze(1)
-                if img_H.dim() == 3:
-                    img_H = img_H.unsqueeze(1)
-                
-                # 尺寸对齐（支持整图）
-                if test_out.shape[2:] != img_H.shape[2:]:
-                    test_out = torch.nn.functional.interpolate(
-                        test_out, size=img_H.shape[2:], 
-                        mode='bilinear', align_corners=False
-                    )
-                
-                # 计算指标
-                test_out_np = image.tensor2uint(test_out)
-                img_H_np = image.tensor2uint(img_H)
-                psnr = image.calculate_psnr(test_out_np, img_H_np)
-                ssim = image.calculate_ssim(test_out_np, img_H_np)
-                
-                avg_psnr += psnr
-                avg_ssim += ssim
-                
-                print(f"  Batch {batch_idx+1}: PSNR={psnr:.2f}, SSIM={ssim:.4f}")
-        
-        if batch_count > 0:
-            avg_psnr = round(avg_psnr / batch_count, 2)
-            avg_ssim = round(avg_ssim * 100 / batch_count, 2)
-            avg_time = loader_inference_time / batch_count
-            print(f"Completed {dataset_name} (sigma={sigma_level}): PSNR={avg_psnr}, SSIM={avg_ssim}, Time={avg_time:.4f}s per batch/image")
-            print("--------------------------------------------------")
-        
-        # 按数据集累积结果
-        if dataset_name not in avg_psnrs:
-            avg_psnrs[dataset_name] = [0] * sigma_size
-            avg_ssims[dataset_name] = [0] * sigma_size
-        avg_psnrs[dataset_name][sigma_idx] = avg_psnr
-        avg_ssims[dataset_name][sigma_idx] = avg_ssim
-
-    # 总体推理时间
-    if total_batches > 0:
-        avg_inference_time = total_inference_time / total_batches
-        logger.info(f"Average inference time per batch/image: {avg_inference_time:.4f} s")
-        print(f"Average inference time per batch/image: {avg_inference_time:.4f} s")
-
-    # 按sigma展示结果表格
-    print("\n======================= 测试结果 =======================")
-    header = ['Dataset'] + [f"σ={s}" for s in opt['test']['sigma']]
+    print("======================= 测试开始 =======================")
     
-    tpsnr = PrettyTable(header)
-    for key, value in avg_psnrs.items():
-        tpsnr.add_row([key] + value)
-    
-    tssim = PrettyTable(header)
-    for key, value in avg_ssims.items():
-        tssim.add_row([key] + value)
-    
-    logger.info(f"Test PSNR:\n{tpsnr}")
-    logger.info(f"Test SSIM:\n{tssim}")
-    print("Test PSNR:\n" + str(tpsnr))
-    print("Test SSIM:\n" + str(tssim))
+    for s_idx, sigma_level in enumerate(sigma_list):
+        current_sigma_dataset = test_set_list[s_idx]
+        loader = data.DataLoader(current_sigma_dataset, batch_size=1, shuffle=False, num_workers=0)
+        
+        print(f"\n🚀 正在测试 Sigma = {sigma_level} ...")
+        
+        for i, batch_data in enumerate(loader):
+            img_H, img_L, noise_level, ids = batch_data
+            img_name = img_names[i]
+            
+            img_L, noise_level, ids = img_L.to(device), noise_level.to(device), ids.to(device)
 
-    print(f"\n测试完成！处理了 {total_batches} 个批次，{len(avg_psnrs)} 个数据集。")
+            with torch.no_grad():
+                output = safe_forward(model, img_L, noise_level, ids)
+            
+            out_np = image.tensor2uint(output)
+            gt_np = image.tensor2uint(img_H)
+            psnr = image.calculate_psnr(out_np, gt_np)
+            ssim = image.calculate_ssim(out_np, gt_np)
+
+            if img_name not in detailed_psnrs:
+                detailed_psnrs[img_name] = [0.0] * sigma_size
+                detailed_ssims[img_name] = [0.0] * sigma_size
+            
+            detailed_psnrs[img_name][s_idx] = psnr
+            detailed_ssims[img_name][s_idx] = ssim
+            
+            print(f"  [{i+1}/{len(img_names)}] Image: {img_name} | PSNR: {psnr:.2f} | SSIM: {ssim:.4f}")
+
+    # --- 修改部分：结果展示与多指标表格生成 ---
+    print("\n" + "="*30 + " 统计报表 " + "="*30)
+    
+    # 构建表头：Image Name | σ=15 (P/S) | σ=25 (P/S) ...
+    header = ['Image Name'] + [f"σ={s} (PSNR/SSIM)" for s in sigma_list]
+    
+    # 1. 生成单图明细表 (PSNR / SSIM 同列显示)
+    t_detail = PrettyTable(header)
+    for name in img_names:
+        row = [name]
+        for s_idx in range(sigma_size):
+            p = detailed_psnrs[name][s_idx]
+            s = detailed_ssims[name][s_idx]
+            row.append(f"{p:.2f} / {s:.4f}")
+        t_detail.add_row(row)
+    
+    # 2. 生成汇总平均表 (PSNR 和 SSIM 分行显示，看得更清楚)
+    # 汇总表头：Metric | σ=15 | σ=25 | σ=50
+    summary_header = ['Metric'] + [f"σ={s}" for s in sigma_list]
+    t_summary = PrettyTable(summary_header)
+    
+    avg_psnr_row = ["Average PSNR"]
+    avg_ssim_row = ["Average SSIM"]
+    
+    for s_idx in range(sigma_size):
+        all_p = [detailed_psnrs[name][s_idx] for name in img_names]
+        all_s = [detailed_ssims[name][s_idx] for name in img_names]
+        avg_psnr_row.append(f"{np.mean(all_p):.2f}")
+        avg_ssim_row.append(f"{np.mean(all_s):.4f}")
+    
+    t_summary.add_row(avg_psnr_row)
+    t_summary.add_row(avg_ssim_row)
+
+    # 打印到控制台
+    print("\n[明细表] 每张图片在不同噪声水平下的指标 (PSNR / SSIM):")
+    print(t_detail)
+    print("\n[汇总表] 数据集整体平均指标:")
+    print(t_summary)
+
+    # 写入日志 (确保 SSIM 被记录)
+    logger.info(f"\nDetailed Test Results (PSNR / SSIM):\n{t_detail}")
+    logger.info(f"\nFinal Average Summary:\n{t_summary}")
+    
+    print(f"\n✅ 测试完成！详细指标已存入日志: {opt['log_path']}")
