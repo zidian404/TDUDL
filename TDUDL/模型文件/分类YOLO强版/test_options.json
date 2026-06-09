@@ -1,0 +1,30 @@
+{
+  "task": "test",
+
+  "log_path": "./log",
+  "gpu_ids": [0],
+
+  "batch_size": 1,
+
+  "num_classes": 24,
+  "nc": [16, 1],
+  "patch_size": [128, 128],
+  "stride_size": [16, 16],
+  "atoms": 50,
+  "d_size": 3,
+
+  "stage": 3,
+  "max_epoch": 80,
+  "scale": 3,
+  "n_channels": 1,
+
+  "pretained_path": "./model_save/model_cls_best.pth",
+
+  "test": {
+    "sigma": [0],
+    "dataroot_H": "./date-gray/test",
+    "H_size": 128,
+    "resize_size": 146,
+    "n_channels": 1
+  }
+}

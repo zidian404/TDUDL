@@ -1,0 +1,45 @@
+{
+  "task": "train",
+
+  "gpu_ids": [0],
+  "log_path": "./log",
+  "model_save": "./model_save",
+
+  "pretained_path": {
+    "index": false,
+    "path": "./model_save/model_cls_best.pth"
+  },
+
+  "batch_size": 4,
+  "val_batch_size": 4,
+
+  "num_classes": 24,
+  "nc": [16, 1],
+  "patch_size": [128, 128],
+  "stride_size": [16, 16],
+  "atoms": 50,
+  "d_size": 3,
+
+  "stage": 3,
+  "max_epoch": 1000,
+  "lr": 1e-4,
+  "loss_function_index": 0,
+  "n_channels": 1,
+  "label_smoothing": 0.0,
+
+  "train": {
+    "sigma": [0],
+    "dataroot_H": "./date-gray/train",
+    "H_size": 128,
+    "resize_size": 146,
+    "n_channels": 1
+  },
+
+  "valid": {
+    "sigma": [0],
+    "dataroot_H": "./date-gray/val",
+    "H_size": 128,
+    "resize_size": 146,
+    "n_channels": 1
+  }
+}
